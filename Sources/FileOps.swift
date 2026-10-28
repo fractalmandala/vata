@@ -5,7 +5,12 @@ import Quartz
 // All mutations refresh the owning pane; failures surface as alerts.
 struct FileOps {
 
+    // Unit-gate seam: records alerts instead of running a modal (which
+    // would block the gate and put a window on screen). Nil in the app.
+    static var alertSink: ((String) -> Void)?
+
     static func alert(_ message: String) {
+        if let alertSink { alertSink(message); return }
         let a = NSAlert()
         a.messageText = message
         a.addButton(withTitle: "OK")

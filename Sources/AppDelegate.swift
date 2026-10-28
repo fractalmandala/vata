@@ -20,7 +20,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    // Unit-gate seam: the gate never shows windows, so it points menu
+    // routing at its headless window here. Always nil in the app.
+    static var headlessKeyWindow: FileWindowController?
+
     static func keyPane() -> PaneViewController? {
+        if let wc = headlessKeyWindow { return wc.activePane ?? wc.leftPane }
         guard let win = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible }),
               let wc = win.windowController as? FileWindowController else { return nil }
         return wc.activePane ?? wc.leftPane
