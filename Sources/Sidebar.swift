@@ -15,23 +15,49 @@ final class SidebarViewController: NSViewController {
     ]
 
     enum Section { case devices, recent, favorites, tags }
-    struct Row {
+    /// Stable identity. A struct (or a fresh String) is a new object every
+    /// time the data source is asked, so the outline cannot track expansion.
+    final class SectionItem: NSObject {
+        let title: String
+        init(_ title: String) { self.title = title }
+    }
+    final class Row: NSObject {
         var section: Section
         var title: String
         var path: String?
         var tagColor: NSColor?
         var volume: URL?
+        init(section: Section, title: String, path: String? = nil, tagColor: NSColor? = nil, volume: URL? = nil) {
+            self.section = section
+            self.title = title
+            self.path = path
+            self.tagColor = tagColor
+            self.volume = volume
+        }
     }
-    private var rows: [Row] = []
+    private let sectionDevices = SectionItem("Devices")
+    private let sectionRecent = SectionItem("Recent Folders")
+    private let sectionFavorites = SectionItem("Favorites")
+    private let sectionTags = SectionItem("Tags")
+    private var deviceRows: [Row] = []
+    private var recentRows: [Row] = []
+    private var favoriteRows: [Row] = []
+    private var tagRows: [Row] = []
 
     override func loadView() {
         view = NSView()
         let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("side"))
         outline.addTableColumn(col)
+        // Without an outline column the chevron is decoration: expandItem
+        // still works, clicks do not.
+        outline.outlineTableColumn = col
+        outline.indentationPerLevel = 16
+        outline.identifier = NSUserInterfaceItemIdentifier("sidebar.outline")
         outline.delegate = self
         outline.dataSource = self
         outline.headerView = nil
         outline.target = self
+        outline.action = #selector(sectionClicked)
         outline.doubleAction = #selector(activated)
         outline.backgroundColor = .clear
         outline.registerForDraggedTypes([.fileURL])
@@ -63,10 +89,10 @@ final class SidebarViewController: NSViewController {
         devices = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeNameKey],
                                                         options: [.skipHiddenVolumes]) ?? []
         recents = RecentStore.shared.paths
-        rows = devices.map { Row(section: .devices, title: $0.lastPathComponent, volume: $0) }
-            + recents.map { Row(section: .recent, title: ($0 as NSString).lastPathComponent, path: $0) }
-            + HeaderStore.shared.paths.map { Row(section: .favorites, title: ($0 as NSString).lastPathComponent, path: $0) }
-            + tags.map { Row(section: .tags, title: $0.0, tagColor: $0.1) }
+        deviceRows = devices.map { Row(section: .devices, title: $0.lastPathComponent, volume: $0) }
+        recentRows = recents.map { Row(section: .recent, title: ($0 as NSString).lastPathComponent, path: $0) }
+        favoriteRows = HeaderStore.shared.paths.map { Row(section: .favorites, title: ($0 as NSString).lastPathComponent, path: $0) }
+        tagRows = tags.map { Row(section: .tags, title: $0.0, tagColor: $0.1) }
         outline.reloadData()
     }
 
@@ -75,6 +101,16 @@ final class SidebarViewController: NSViewController {
         outline.backgroundColor = t.sidebarBG
         outline.enclosingScrollView?.backgroundColor = t.sidebarBG
         outline.reloadData()
+    }
+
+    /// Single click on a section header (Devices, Recent, …) toggles it.
+    /// `clickedRow` is set by a real mouse event; `selectedRow` covers
+    /// `sendAction` from the gate, which does not synthesize a click.
+    @objc private func sectionClicked() {
+        let row = outline.clickedRow >= 0 ? outline.clickedRow : outline.selectedRow
+        guard row >= 0, let item = outline.item(atRow: row), item is SectionItem else { return }
+        if outline.isItemExpanded(item) { outline.collapseItem(item) }
+        else { outline.expandItem(item) }
     }
 
     @objc private func activated() {
@@ -100,12 +136,10 @@ final class SidebarViewController: NSViewController {
 
 extension SidebarViewController: NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
     // Grouped sections: Devices / Recent Folders / Favorites / Tags.
-    private var grouped: [(title: String, rows: [Row])] {
-        let dev = devices.map { Row(section: .devices, title: $0.lastPathComponent, volume: $0) }
-        let rec = recents.map { Row(section: .recent, title: ($0 as NSString).lastPathComponent, path: $0) }
-        let fav = HeaderStore.shared.paths.map { Row(section: .favorites, title: ($0 as NSString).lastPathComponent, path: $0) }
-        let tag = tags.map { Row(section: .tags, title: $0.0, tagColor: $0.1) }
-        return [("Devices", dev), ("Recent Folders", rec), ("Favorites", fav), ("Tags", tag)]
+    // Section objects are stable across reloadData so expansion sticks.
+    private var grouped: [(section: SectionItem, rows: [Row])] {
+        [(sectionDevices, deviceRows), (sectionRecent, recentRows),
+         (sectionFavorites, favoriteRows), (sectionTags, tagRows)]
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -127,26 +161,37 @@ extension SidebarViewController: NSOutlineViewDataSource, NSOutlineViewDelegate,
 
     func outlineView(_ ov: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         if item == nil { return grouped.count }
-        if let title = item as? String { return grouped.first(where: { $0.title == title })?.rows.count ?? 0 }
+        if let section = item as? SectionItem {
+            return grouped.first(where: { $0.section === section })?.rows.count ?? 0
+        }
         return 0
     }
 
     func outlineView(_ ov: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        if item == nil { return grouped[index].title }
-        if let title = item as? String { return grouped.first(where: { $0.title == title })!.rows[index] }
-        return grouped[index].title
+        if item == nil { return grouped[index].section }
+        if let section = item as? SectionItem,
+           let rows = grouped.first(where: { $0.section === section })?.rows,
+           rows.indices.contains(index) {
+            return rows[index]
+        }
+        return grouped[0].section
     }
 
     func outlineView(_ ov: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        item is String
+        item is SectionItem
     }
 
     func outlineView(_ ov: NSOutlineView, isGroupItem item: Any) -> Bool {
-        item is String
+        // Group rows draw their own chevron and cover the outline button,
+        // so the triangle looks real and does not track clicks. Sections
+        // use a normal outline cell instead.
+        false
     }
 
     func outlineView(_ ov: NSOutlineView, shouldSelectItem item: Any) -> Bool {
-        item is Row
+        // Sections must be selectable or AppKit never sends `action` for
+        // them, and a click on "Devices" cannot toggle the disclosure.
+        item is Row || item is SectionItem
     }
 
     private func dropRow(at info: NSDraggingInfo) -> Row? {
@@ -185,9 +230,9 @@ extension SidebarViewController: NSOutlineViewDataSource, NSOutlineViewDelegate,
     }
 
     func outlineView(_ ov: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
-        if let title = item as? String {
+        if let section = item as? SectionItem {
             let id = NSUserInterfaceItemIdentifier("sidegroup")
-            let cell = ov.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? NSTableCellView()
+            let cell = ov.makeView(withIdentifier: id, owner: self) as? SidebarHeaderCell ?? SidebarHeaderCell()
             cell.identifier = id
             if cell.textField == nil {
                 let tf = NSTextField(labelWithString: "")
@@ -202,7 +247,7 @@ extension SidebarViewController: NSOutlineViewDataSource, NSOutlineViewDelegate,
                     tf.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
                 ])
             }
-            cell.textField?.stringValue = title
+            cell.textField?.stringValue = section.title
             return cell
         }
         guard let row = item as? Row else { return nil }
@@ -257,6 +302,17 @@ extension SidebarViewController: NSOutlineViewDataSource, NSOutlineViewDelegate,
         NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: 10, height: 10)).fill()
         img.unlockFocus()
         return img
+    }
+}
+
+/// Section header cell. The label sits on top of the outline's disclosure
+/// button (a sibling). If this cell returns itself from hit-testing, the
+/// triangle looks live and the click never reaches the button.
+final class SidebarHeaderCell: NSTableCellView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        if hit === self || hit is NSTextField { return nil }
+        return hit
     }
 }
 

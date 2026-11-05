@@ -3,6 +3,13 @@
 // observable end state — what you could see, not "state changed".
 // Coverage is computed from controls FOUND, not from the command table:
 // any control without a row fails as uncovered-control:<title>.
+//
+// sendAction is not proof a control works. Buttons drawn under the
+// full-size titlebar still have a target and still respond, and the
+// click hits the titlebar drag region instead. Chrome checks below
+// require the control to sit under that band, to win hit-testing, and
+// only then to change pane state. Setting a segmented control's
+// selection without sending its action must not count as a mode change.
 import AppKit
 import Foundation
 
@@ -75,8 +82,17 @@ struct ControlAudit {
         }
         if let root = wc.window?.contentView { walk(root) }
         check(!buttons.isEmpty, "controls:buttons-found")
-        var coveredButtons = 0
-        for b in buttons {
+        // Outline disclosure buttons are untitled and audited with the
+        // sidebar. Don't treat "no title" as an unwired product button.
+        func isOutlineChrome(_ b: NSView) -> Bool {
+            var v: NSView? = b
+            while let cur = v {
+                if cur is NSTableRowView || cur is NSOutlineView { return true }
+                v = cur.superview
+            }
+            return false
+        }
+        for b in buttons where !isOutlineChrome(b) {
             guard let action = b.action else { check(false, "uncovered-control:\(b.title)-no-action"); continue }
             let t = b.target
             check(t != nil, "wiring:target-present:\(b.title)")
@@ -84,38 +100,9 @@ struct ControlAudit {
                 check(t.responds(to: action), "wiring:responds:\(b.title)->\(NSStringFromSelector(action))")
             }
         }
-        // Drive the nav buttons through the real controls.
-        func press(title: String) {
-            guard let b = buttons.first(where: { $0.title == title }),
-                  let action = b.action, let t = b.target else {
-                check(false, "uncovered-control:\(title)"); return
-            }
-            NSApp.sendAction(action, to: t, from: b)
-            RunLoop.main.run(until: Date().addingTimeInterval(1.0))
-        }
-        // go into sub via direct navigate, then Back/Forward/Up through buttons.
-        pane.navigate(to: "\(scratch)/sub", record: true)
-        RunLoop.main.run(until: Date().addingTimeInterval(1.0))
-        press(title: "‹"); check(pane.displayedPath == scratch, "intent:back"); markCovered("back")
-        press(title: "›"); check(pane.displayedPath == "\(scratch)/sub", "intent:forward"); markCovered("forward")
-        press(title: "⌃"); check(pane.displayedPath == scratch, "intent:up"); markCovered("up")
-        coveredButtons += 3
-
-        // Mode segmented: 4 modes through the real control.
-        if let seg = findSegmented(in: pane.view) {
-            let modes: [PaneViewController.ViewMode] = [.list, .columns, .icons, .gallery]
-            for (i, m) in modes.enumerated() {
-                seg.selectedSegment = i
-                if let action = seg.action, let t = seg.target {
-                    check(t.responds(to: action), "wiring:responds:mode-segment")
-                    NSApp.sendAction(action, to: t, from: seg)
-                }
-                check(pane.viewMode == m, "intent:viewmode-\(m)")
-                markCovered(["viewList", "viewColumns", "viewIcons", "viewGallery"][i])
-            }
-        } else {
-            check(false, "uncovered-control:view-mode-segment")
-        }
+        // Both panes, by identifier — the first "‹" in a walk is not the
+        // right pane, and a title match misses a control with no title.
+        auditDualPaneChrome(wc)
 
         // ---- 2. Menus: every item must resolve to a covered command ----
         MenuBuilder.build()
@@ -494,11 +481,315 @@ struct ControlAudit {
         }
     }
 
-    static func findSegmented(in v: NSView) -> NSSegmentedControl? {
-        for sub in v.subviews {
-            if let s = sub as? NSSegmentedControl { return s }
-            if let found = findSegmented(in: sub) { return found }
+    // MARK: - Dual-pane chrome (clicks, not just sendAction)
+
+    static func auditDualPaneChrome(_ wc: FileWindowController) {
+        guard let window = wc.window else { check(false, "chrome:no-window"); return }
+        window.setFrame(NSRect(x: 0, y: 0, width: 1300, height: 750), display: false)
+        window.layoutIfNeeded()
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.layoutIfNeeded()
+        let inset = TitlebarMetrics.contentTopInset(window)
+        let measured = TitlebarMetrics.measuredOverlap(window)
+        print("chrome-inset=\(inset) measured=\(measured) fullSize=\(window.styleMask.contains(.fullSizeContentView))")
+        if window.styleMask.contains(.fullSizeContentView) {
+            check(inset >= 22, "chrome:titlebar-inset-known:\(inset)")
+        }
+        if let host = window.contentView,
+           let split = host.subviews.first(where: { $0 is NSSplitView }) {
+            let gap = host.bounds.maxY - split.frame.maxY
+            check(host.bounds.height > 100, "chrome:host-laid-out h=\(host.bounds.height)")
+            check(gap + 0.5 >= inset, "chrome:split-below-titlebar gap=\(gap) inset=\(inset)")
+        } else {
+            check(false, "chrome:split-missing")
+        }
+
+        auditPaneChrome(wc.leftPane, name: "left", window: window)
+        waitForPath(wc.rightPane, "/Applications")
+        auditPaneChrome(wc.rightPane, name: "right", window: window)
+        wc.rightPane.navigate(to: "/Applications", record: true)
+        waitForPath(wc.rightPane, "/Applications")
+
+        auditDevicesDisclosure(window)
+        auditNoInteractiveControlInTitlebar(window)
+    }
+
+    static func auditPaneChrome(_ pane: PaneViewController, name: String, window: NSWindow) {
+        window.contentView?.layoutSubtreeIfNeeded()
+        guard let back = find(NSButton.self, id: "pane.back", in: pane.view),
+              let fwd = find(NSButton.self, id: "pane.forward", in: pane.view),
+              let up = find(NSButton.self, id: "pane.up", in: pane.view),
+              let path = find(NSPathControl.self, id: "pane.path", in: pane.view),
+              let seg = find(NSSegmentedControl.self, id: "pane.mode", in: pane.view) else {
+            check(false, "uncovered-control:\(name):chrome-missing")
+            return
+        }
+        assertWired(back, name: "\(name):back")
+        assertWired(fwd, name: "\(name):forward")
+        assertWired(up, name: "\(name):up")
+        assertWired(path, name: "\(name):path")
+        assertWired(seg, name: "\(name):mode")
+        check(up.isEnabled, "wiring:enabled:\(name):up")
+        check(path.isEnabled, "wiring:enabled:\(name):path")
+        check(seg.isEnabled, "wiring:enabled:\(name):mode")
+        // AppKit calls this optional delegate method when the popup opens.
+        // The invocation below goes through the protocol, so a misspelled
+        // or missing method leaves the menu empty and fails closed.
+        check(path.delegate === pane, "wiring:path-delegate:\(name)")
+        check(seg.segmentCount == 4, "wiring:mode-count:\(name)")
+        check(seg.label(forSegment: 0) == "List" && seg.label(forSegment: 1) == "Columns"
+              && seg.label(forSegment: 2) == "Icons" && seg.label(forSegment: 3) == "Gallery",
+              "wiring:mode-labels:\(name)")
+        let chrome: [(NSView, String)] = [
+            (back, "back"), (fwd, "forward"), (up, "up"), (path, "path"), (seg, "mode"),
+        ]
+        for (view, label) in chrome {
+            assertClickable(view, name: "\(name):\(label)", window: window, requireHit: (view as? NSControl)?.isEnabled ?? true)
+        }
+
+        // A click updates the segment, THEN sends the action. Writing the
+        // segment index must not itself count as switching views.
+        let modes: [(Int, PaneViewController.ViewMode, String)] = [
+            (1, .columns, "viewColumns"),
+            (2, .icons, "viewIcons"),
+            (3, .gallery, "viewGallery"),
+            (0, .list, "viewList"),
+        ]
+        for (idx, mode, cmd) in modes {
+            let before = pane.viewMode
+            seg.selectedSegment = idx
+            check(pane.viewMode == before, "chrome:mode-not-implicit:\(name):\(mode)")
+            guard let action = seg.action, let t = seg.target, t.responds(to: action) else {
+                check(false, "uncovered-control:\(name):mode")
+                continue
+            }
+            NSApp.sendAction(action, to: t, from: seg)
+            let ok = pane.viewMode == mode
+            check(ok, "intent:viewmode-\(name)-\(mode)")
+            if ok { markCovered(cmd) }
+        }
+
+        let scratch = "/tmp/vata-intent-scratch"
+        let nested = "\(scratch)/sub"
+        pane.navigate(to: scratch, record: true)
+        waitForPath(pane, scratch)
+        pane.navigate(to: nested, record: true)
+        waitForPath(pane, nested)
+        window.contentView?.layoutSubtreeIfNeeded()
+        check(back.isEnabled, "chrome:back-enabled:\(name)")
+        check(!fwd.isEnabled, "chrome:forward-disabled-at-tip:\(name)")
+        check(up.isEnabled, "chrome:up-enabled:\(name)")
+        assertClickable(back, name: "\(name):back", window: window, requireHit: true)
+        assertClickable(up, name: "\(name):up", window: window, requireHit: true)
+        assertClickable(path, name: "\(name):path", window: window, requireHit: true)
+
+        fire(back, name: "\(name):back")
+        waitForPath(pane, scratch)
+        check(pane.displayedPath == scratch, "intent:back:\(name)")
+        if pane.displayedPath == scratch { markCovered("back") }
+
+        check(fwd.isEnabled, "chrome:forward-enabled:\(name)")
+        assertClickable(fwd, name: "\(name):forward", window: window, requireHit: true)
+        fire(fwd, name: "\(name):forward")
+        waitForPath(pane, nested)
+        check(pane.displayedPath == nested, "intent:forward:\(name)")
+        if pane.displayedPath == nested { markCovered("forward") }
+
+        fire(up, name: "\(name):up")
+        waitForPath(pane, scratch)
+        check(pane.displayedPath == scratch, "intent:up:\(name)")
+        if pane.displayedPath == scratch { markCovered("up") }
+
+        pane.navigate(to: nested, record: true)
+        waitForPath(pane, nested)
+        let menu = NSMenu()
+        (pane as NSPathControlDelegate).pathControl?(path, willPopUpMenu: menu)
+        check(!menu.items.isEmpty, "uncovered-control:\(name):path-menu-empty")
+        for mi in menu.items {
+            check(mi.action != nil && mi.target === pane, "wiring:path-item-live:\(name):\(mi.title)")
+            check(mi.representedObject is URL, "wiring:path-item-url:\(name):\(mi.title)")
+        }
+        let parent = (nested as NSString).deletingLastPathComponent
+        if let item = menu.items.first(where: { mi in
+            guard let p = (mi.representedObject as? URL)?.path else { return false }
+            return samePath(p, parent)
+        }) {
+            let target = (item.representedObject as! URL).path
+            guard let action = item.action, let t = item.target, t.responds(to: action) else {
+                check(false, "uncovered-control:\(name):path-parent")
+                return
+            }
+            NSApp.sendAction(action, to: t, from: item)
+            waitForPath(pane, target)
+            check(pane.displayedPath == target, "intent:path-popup:\(name)")
+            let stayed = pane.displayedPath
+            if let action = path.action, let t = path.target {
+                NSApp.sendAction(action, to: t, from: path)
+                RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+                check(pane.displayedPath == stayed, "chrome:path-action-without-click-is-noop:\(name)")
+            }
+        } else {
+            let paths = menu.items.compactMap { ($0.representedObject as? URL)?.path }
+            check(false, "uncovered-control:\(name):path-parent-item paths=\(paths.joined(separator: "|"))")
+        }
+    }
+
+    static func auditDevicesDisclosure(_ window: NSWindow) {
+        guard let content = window.contentView else { check(false, "chrome:no-content"); return }
+        content.layoutSubtreeIfNeeded()
+        guard let outline = find(NSOutlineView.self, id: "sidebar.outline", in: content) else {
+            check(false, "uncovered-control:devices-disclosure")
+            return
+        }
+        if outline.numberOfRows == 0 {
+            outline.reloadData()
+            content.layoutSubtreeIfNeeded()
+        }
+        check(outline.numberOfRows > 0, "sidebar:has-rows")
+        check(outline.outlineTableColumn != nil, "sidebar:outline-column")
+        check(outline.outlineTableColumn === outline.tableColumns.first, "sidebar:outline-column-is-side")
+        guard let action = outline.action, let t = outline.target, t.responds(to: action) else {
+            check(false, "uncovered-control:devices-header-no-action")
+            return
+        }
+        guard outline.numberOfRows > 0, let item = outline.item(atRow: 0) else {
+            check(false, "sidebar:devices-row-missing")
+            return
+        }
+        check(outline.isExpandable(item), "sidebar:devices-expandable")
+        guard let rowView = outline.rowView(atRow: 0, makeIfNecessary: true) else {
+            check(false, "sidebar:devices-rowview-missing")
+            return
+        }
+        rowView.layoutSubtreeIfNeeded()
+        content.layoutSubtreeIfNeeded()
+        outline.displayIfNeeded()
+        rowView.displayIfNeeded()
+        var discs = nsButtons(in: rowView)
+        if discs.isEmpty {
+            let rowRect = outline.rect(ofRow: 0)
+            discs = nsButtons(in: outline).filter { button in
+                let f = button.convert(button.bounds, to: outline)
+                return rowRect.intersects(f)
+            }
+        }
+        check(!discs.isEmpty, "sidebar:disclosure-button-present")
+        if let button = discs.min(by: { $0.frame.minX < $1.frame.minX }) {
+            check(button.isEnabled, "sidebar:disclosure-enabled")
+            assertClickable(button, name: "devices-disclosure", window: window, requireHit: true)
+        }
+        let was = outline.isItemExpanded(item)
+        outline.selectRowIndexes([0], byExtendingSelection: false)
+        NSApp.sendAction(action, to: t, from: outline)
+        check(outline.isItemExpanded(item) != was, "intent:devices-disclosure-toggles")
+        NSApp.sendAction(action, to: t, from: outline)
+        check(outline.isItemExpanded(item) == was, "intent:devices-disclosure-toggles-back")
+    }
+
+    /// Every live control in the window, including ones created while the
+    /// disclosure row was materialized. A control that intersects the
+    /// titlebar band fails even if some other control of the same title
+    /// was fine.
+    static func auditNoInteractiveControlInTitlebar(_ window: NSWindow) {
+        guard let content = window.contentView else { return }
+        content.layoutSubtreeIfNeeded()
+        let inset = TitlebarMetrics.contentTopInset(window)
+        let topLimit = content.bounds.maxY - inset
+        func walk(_ v: NSView) {
+            guard let control = v as? NSControl else {
+                for s in v.subviews { walk(s) }
+                continue
+            }
+            let interesting = control.action != nil || v is NSPathControl || v is NSSegmentedControl
+            if interesting {
+                let rect = control.convert(control.bounds, to: content)
+                // Tall views (the sidebar outline) may kiss the band by a
+                // point of rounding. A toolbar button is short, so the
+                // same overlap is a real miss.
+                let slop: CGFloat = control.bounds.height > 100 ? 4 : 0.5
+                if rect.width > 2, rect.height > 2, rect.maxY > topLimit + slop {
+                    let id = control.identifier?.rawValue
+                        ?? (control as? NSButton)?.title
+                        ?? String(describing: type(of: control))
+                    check(false, "chrome:control-in-titlebar:\(id)")
+                }
+            }
+            for s in v.subviews { walk(s) }
+        }
+        walk(content)
+    }
+
+    static func assertWired(_ control: NSControl, name: String) {
+        guard let action = control.action else {
+            check(false, "uncovered-control:\(name)-no-action")
+            return
+        }
+        guard let t = control.target else {
+            check(false, "wiring:target-present:\(name)")
+            return
+        }
+        check(t.responds(to: action), "wiring:responds:\(name)->\(NSStringFromSelector(action))")
+    }
+
+    static func fire(_ control: NSControl, name: String) {
+        guard let action = control.action, let t = control.target, t.responds(to: action) else {
+            check(false, "uncovered-control:\(name)")
+            return
+        }
+        NSApp.sendAction(action, to: t, from: control)
+    }
+
+    static func assertClickable(_ view: NSView, name: String, window: NSWindow, requireHit: Bool) {
+        guard let content = window.contentView else {
+            check(false, "chrome:no-content:\(name)")
+            return
+        }
+        content.layoutSubtreeIfNeeded()
+        let inset = TitlebarMetrics.contentTopInset(window)
+        let rect = view.convert(view.bounds, to: content)
+        let topLimit = content.bounds.maxY - inset
+        check(rect.width > 2 && rect.height > 2, "chrome:has-size:\(name) \(Int(rect.width))x\(Int(rect.height))")
+        check(rect.maxY <= topLimit + 0.5, "chrome:below-titlebar:\(name) maxY=\(Int(rect.maxY)) limit=\(Int(topLimit))")
+        check(!view.isHiddenOrHasHiddenAncestor, "chrome:visible:\(name)")
+        guard requireHit else { return }
+        let mid = NSPoint(x: view.bounds.midX, y: view.bounds.midY)
+        // NSView.hitTest's point is documented as both "receiver coordinates"
+        // and "superview coordinates" across SDK versions. Try both; a hit
+        // only counts if it is this control. Missing both fails closed.
+        var points: [NSPoint] = [view.convert(mid, to: content)]
+        if let frameView = content.superview {
+            points.append(view.convert(mid, to: frameView))
+        }
+        let reached = points.contains { point in
+            guard let hit = content.hitTest(point) else { return false }
+            return hit === view || hit.isDescendant(of: view)
+        }
+        if !reached {
+            let sample = content.hitTest(points[0])
+            let hitName = sample.map { String(describing: type(of: $0)) } ?? "nil"
+            check(false, "chrome:hittest:\(name) hit=\(hitName)")
+        }
+    }
+
+    static func find<T: NSView>(_ type: T.Type, id: String, in root: NSView) -> T? {
+        if let v = root as? T, v.identifier?.rawValue == id { return v }
+        for s in root.subviews {
+            if let found = find(type, id: id, in: s) { return found }
         }
         return nil
+    }
+
+    static func nsButtons(in v: NSView) -> [NSButton] {
+        var out: [NSButton] = []
+        if let b = v as? NSButton { out.append(b) }
+        for s in v.subviews { out.append(contentsOf: nsButtons(in: s)) }
+        return out
+    }
+
+    static func samePath(_ a: String, _ b: String) -> Bool {
+        if a == b { return true }
+        let lhs = URL(fileURLWithPath: a).resolvingSymlinksInPath().standardizedFileURL.path
+        let rhs = URL(fileURLWithPath: b).resolvingSymlinksInPath().standardizedFileURL.path
+        return lhs == rhs
     }
 }
