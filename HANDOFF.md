@@ -72,7 +72,7 @@ project (`build.sh` compiles with `swiftc`). Source of truth for behavior:
   `TitlebarMetrics.contentTopInset`. Sidebar sections must set
   `outlineTableColumn` and must NOT return true from `isGroupItem`
   (group rows cover the disclosure button). Path popup items are wired
-  in `pathControl(_:willPopUpMenu:)`, not by reading `pathControl.url`
+  in `pathControl(_:willPopUp:)`, not by reading `pathControl.url`
   (that is the current folder and undoes the pick).
 - `NSButton`/`NSMenuItem` hold targets **weakly**: inline `BlockTarget{}`
   deallocs instantly. `BlockTarget` now self-retains (`SettingsWindow.swift`).

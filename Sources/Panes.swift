@@ -419,7 +419,7 @@ class PaneViewController: NSViewController {
         content?.show(items: items)
     }
     @objc private func pathChosen() {
-        // The popup's items navigate on their own (see willPopUpMenu).
+        // The popup's items navigate on their own (see willPopUp).
         // Reading `url` here is the current folder, so an action that
         // fires as the menu opens yanks the pane back and the pick
         // looks dead. Only honor a component AppKit actually names.
@@ -525,7 +525,7 @@ extension PaneViewController: NSPathControlDelegate {
         return chain.reversed()
     }
 
-    @objc func pathControl(_ pathControl: NSPathControl, willPopUpMenu menu: NSMenu) {
+    @objc func pathControl(_ pathControl: NSPathControl, willPopUp menu: NSMenu) {
         menu.removeAllItems()
         for url in pathComponentURLs(pathControl).reversed() {
             let raw = url.lastPathComponent

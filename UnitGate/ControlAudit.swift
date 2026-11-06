@@ -141,7 +141,9 @@ struct ControlAudit {
             pane.menuNeedsUpdate(list.headerMenu)
             if let kindItem = list.headerMenu.items.first(where: { ($0.representedObject as? String) == "kind" }) {
                 let before = pane.visibleColumns.contains("kind")
-                kindItem.target.map { NSApp.sendAction(kindItem.action!, to: $0, from: kindItem) }
+                if let action = kindItem.action, let t = kindItem.target {
+                    NSApp.sendAction(action, to: t, from: kindItem)
+                }
                 check(pane.visibleColumns.contains("kind") != before, "intent:toggle-kind-column")
             } else { check(false, "uncovered-control:header-kind") }
         }
@@ -603,7 +605,7 @@ struct ControlAudit {
         pane.navigate(to: nested, record: true)
         waitForPath(pane, nested)
         let menu = NSMenu()
-        (pane as NSPathControlDelegate).pathControl?(path, willPopUpMenu: menu)
+        (pane as NSPathControlDelegate).pathControl?(path, willPopUp: menu)
         check(!menu.items.isEmpty, "uncovered-control:\(name):path-menu-empty")
         for mi in menu.items {
             check(mi.action != nil && mi.target === pane, "wiring:path-item-live:\(name):\(mi.title)")
@@ -698,7 +700,7 @@ struct ControlAudit {
         func walk(_ v: NSView) {
             guard let control = v as? NSControl else {
                 for s in v.subviews { walk(s) }
-                continue
+                return
             }
             let interesting = control.action != nil || v is NSPathControl || v is NSSegmentedControl
             if interesting {
