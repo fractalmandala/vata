@@ -1,6 +1,9 @@
 // In-process UI audit, compiled into the unit gate (never shipped).
 // Instantiates real controllers WITHOUT showing windows: no screen,
-// no prompts, no focus. Fails the build on dead controls.
+// no prompts, no focus.
+// Target and action are necessary but not sufficient — a control under
+// the full-size titlebar still looks wired while clicks never arrive.
+// That class of miss is ControlAudit's chrome geometry and hit-testing.
 import AppKit
 import Foundation
 

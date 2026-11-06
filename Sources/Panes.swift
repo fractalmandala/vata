@@ -1,6 +1,57 @@
 import AppKit
 import Quartz
 
+// Draggable titlebar band that overlaps a `.fullSizeContentView` window.
+// Controls drawn in that band are visible (the bar is translucent) but
+// never receive clicks — the titlebar takes the mouse to drag the window.
+// `NSApp.sendAction` skips hit-testing, so a gate that only sendAction's
+// stays green. 0 from `measuredOverlap` means AppKit did not report a
+// band; it does NOT mean the top of the content view is safe to use.
+enum TitlebarMetrics {
+    /// Taller than the classic 28pt bar so a slightly larger modern
+    /// titlebar still clears. Replaced by a real measurement when AppKit
+    /// reports one.
+    static let fallbackFullSizeBand: CGFloat = 38
+
+    static func measuredOverlap(_ window: NSWindow) -> CGFloat {
+        guard let content = window.contentView else { return 0 }
+        let layout = window.contentLayoutRect
+        guard layout.width > 1, layout.height > 1, content.bounds.height > 1 else { return 0 }
+        let inContent = content.convert(layout, from: nil)
+        let overlap = content.bounds.maxY - inContent.maxY
+        if overlap < 1 || overlap > 80 { return 0 }
+        return overlap
+    }
+
+    static func contentTopInset(_ window: NSWindow) -> CGFloat {
+        if window.styleMask.contains(.fullScreen) { return 0 }
+        let measured = measuredOverlap(window)
+        if window.styleMask.contains(.fullSizeContentView) {
+            return max(measured, fallbackFullSizeBand)
+        }
+        return measured
+    }
+}
+
+/// Content root that keeps the split pinned below the titlebar band
+/// whenever AppKit lays the window out (including the first show, when
+/// `contentLayoutRect` may not have been valid at init).
+final class ChromeHostView: NSView {
+    var onLayout: (() -> Void)?
+    private var inLayout = false
+    override func layout() {
+        super.layout()
+        guard !inLayout else { return }
+        inLayout = true
+        onLayout?()
+        inLayout = false
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        onLayout?()
+    }
+}
+
 // One pane: path field + back/forward + table listing a Datasource.
 // Listing always runs off the main thread; results stream in incrementally.
 // Speed baseline: no synchronous filesystem access on main, ever.
@@ -58,27 +109,38 @@ class PaneViewController: NSViewController {
         let toolbar = NSStackView()
         toolbar.orientation = .horizontal
         toolbar.spacing = 6
-        for (btn, title, action) in [
-            (backButton, "‹", #selector(goBackward)),
-            (forwardButton, "›", #selector(goForward)),
-            (upButton, "⌃", #selector(goUp)),
-        ] as [(NSButton, String, Selector)] {
-            btn.title = title
+        // Bezel / path style replace the cell. Set target and action AFTER
+        // that, or the click has nothing to send.
+        for (btn, title, action, ident) in [
+            (backButton, "‹", #selector(goBackward), "pane.back"),
+            (forwardButton, "›", #selector(goForward), "pane.forward"),
+            (upButton, "⌃", #selector(goUp), "pane.up"),
+        ] as [(NSButton, String, Selector, String)] {
+            btn.setButtonType(.momentaryPushIn)
             btn.bezelStyle = .inline
             btn.controlSize = .small
+            btn.title = title
+            btn.identifier = NSUserInterfaceItemIdentifier(ident)
             btn.target = self
             btn.action = action
         }
+        pathControl.identifier = NSUserInterfaceItemIdentifier("pane.path")
+        pathControl.pathStyle = .popUp
+        pathControl.controlSize = .small
+        pathControl.delegate = self
         pathControl.target = self
         pathControl.action = #selector(pathChosen)
-        pathControl.pathStyle = .popUp
+        pathControl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        pathControl.setContentHuggingPriority(.defaultLow, for: .horizontal)
         subtitleLabel.font = .systemFont(ofSize: 11)
         subtitleLabel.textColor = .secondaryLabelColor
+        modeSeg.identifier = NSUserInterfaceItemIdentifier("pane.mode")
         modeSeg.segmentCount = 4
         modeSeg.setLabel("List", forSegment: 0)
         modeSeg.setLabel("Columns", forSegment: 1)
         modeSeg.setLabel("Icons", forSegment: 2)
         modeSeg.setLabel("Gallery", forSegment: 3)
+        modeSeg.trackingMode = .selectOne
         modeSeg.selectedSegment = 0
         modeSeg.target = self
         modeSeg.action = #selector(modeChanged)
@@ -92,6 +154,7 @@ class PaneViewController: NSViewController {
         toolbar.addArrangedSubview(pathControl)
         toolbar.addArrangedSubview(modeSeg)
         toolbar.addArrangedSubview(spinner)
+        pathControl.widthAnchor.constraint(greaterThanOrEqualToConstant: 72).isActive = true
 
         container.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.font = .systemFont(ofSize: 11)
@@ -135,7 +198,12 @@ class PaneViewController: NSViewController {
         vc.pane = self
         vc.onSelectionChange = { [weak self] in
             guard let self else { return }
-            (self.view.window?.windowController as? FileWindowController)?.activePane = self
+            // A listing reload posts selection-did-change, including the
+            // restore in ListContentView.show. That must not steal the pane
+            // clone and the window chrome treat as active.
+            if !self.suspendActivation, !self.selectedItems.isEmpty {
+                (self.view.window?.windowController as? FileWindowController)?.activePane = self
+            }
             self.updateChrome()
         }
         vc.onOpen = { [weak self] in self?.openItem($0) }
@@ -155,11 +223,15 @@ class PaneViewController: NSViewController {
     }
 
     @objc private func modeChanged() {
-        setMode(ViewMode.allCases[modeSeg.selectedSegment])
+        let i = modeSeg.selectedSegment
+        guard ViewMode.allCases.indices.contains(i) else { return }
+        setMode(ViewMode.allCases[i])
     }
 
     var displayedPath: String { historyIndex >= 0 ? history[historyIndex] : datasource.initialPath }
     var selectedItems: [Fileinfo] { content?.selectedItems ?? [] }
+    /// Set while a reload is putting the previous selection back.
+    var suspendActivation = false
 
     func selectAllContent() { content?.selectAll() }
 
@@ -169,7 +241,7 @@ class PaneViewController: NSViewController {
         loadGeneration += 1
         let gen = loadGeneration
         spinner.startAnimation(nil)
-        pathControl.url = URL(fileURLWithPath: path)
+        pathControl.url = URL(fileURLWithPath: path, isDirectory: true)
         RecentStore.shared.visited(path)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -354,19 +426,27 @@ class PaneViewController: NSViewController {
         content?.show(items: items)
     }
     @objc private func pathChosen() {
-        guard let url = pathControl.url, url.isFileURL else { return }
+        // The popup's items navigate on their own (see willPopUp).
+        // Reading `url` here is the current folder, so an action that
+        // fires as the menu opens yanks the pane back and the pick
+        // looks dead. Only honor a component AppKit actually names.
+        guard let url = pathControl.clickedPathItem?.url, url.isFileURL else { return }
         navigate(to: url.path, record: true)
     }
 
     @objc func goBackward() {
         guard historyIndex > 0 else { return }
         historyIndex -= 1
+        // History, not the listing, decides whether Forward is clickable.
+        // display() updates the chrome later, after the folder loads.
+        updateChrome()
         navigate(to: history[historyIndex], record: false)
     }
 
     @objc func goForward() {
         guard historyIndex < history.count - 1 else { return }
         historyIndex += 1
+        updateChrome()
         navigate(to: history[historyIndex], record: false)
     }
 
@@ -434,6 +514,44 @@ class PaneViewController: NSViewController {
         guard let item = selectedOrClicked().first,
               let wc = view.window?.windowController as? FileWindowController else { return }
         wc.showPreview(item: item)
+    }
+}
+
+extension PaneViewController: NSPathControlDelegate {
+    /// Full path, root first. `pathItems` is the source of truth when the
+    /// control has built them; otherwise walk the URL so a popup still
+    /// lists parents (the control itself only shows the leaf).
+    fileprivate func pathComponentURLs(_ pathControl: NSPathControl) -> [URL] {
+        let fromItems = pathControl.pathItems.compactMap { $0.url }
+        if fromItems.count >= 2 { return fromItems }
+        guard let leaf = pathControl.url else { return fromItems }
+        var chain: [URL] = []
+        var current = leaf
+        while true {
+            chain.append(current)
+            let parent = current.deletingLastPathComponent()
+            if parent.path == current.path { break }
+            current = parent
+        }
+        return chain.reversed()
+    }
+
+    @objc func pathControl(_ pathControl: NSPathControl, willPopUp menu: NSMenu) {
+        menu.removeAllItems()
+        for url in pathComponentURLs(pathControl).reversed() {
+            let raw = url.lastPathComponent
+            let title = raw.isEmpty ? "/" : raw
+            let mi = NSMenuItem(title: title, action: #selector(pathMenuPicked(_:)), keyEquivalent: "")
+            mi.target = self
+            mi.representedObject = url
+            mi.isEnabled = true
+            menu.addItem(mi)
+        }
+    }
+
+    @objc func pathMenuPicked(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL, url.isFileURL else { return }
+        navigate(to: url.path, record: true)
     }
 }
 
@@ -655,10 +773,11 @@ extension PaneViewController: NSMenuDelegate {
     }
 }
 
-// Window with 1–4 panes plus header pins.
-// Pins live in the window TITLE BAR (NSToolbar), not in content.
-// Two-pane window, ForkLift parity: sidebar (Devices/Recent/Tags),
-// title-bar toolbar (pins + actions), breadcrumb panes in an H-split.
+// Two-pane window, ForkLift parity: sidebar (Devices/Recent/Tags) and
+// per-pane chrome (back/forward/up, path popup, view modes).
+// `.fullSizeContentView` stays so a future titlebar accessory does not
+// throw. The split is inset by `TitlebarMetrics` so that chrome is NOT
+// under the translucent titlebar — clicks there drag the window.
 final class FileWindowController: NSWindowController {
 
     private(set) var panes: [PaneViewController] = []
@@ -666,6 +785,8 @@ final class FileWindowController: NSWindowController {
     var leftPane: PaneViewController { panes[0] }
     var rightPane: PaneViewController { panes.count > 1 ? panes[1] : panes[0] }
     private var sidebar: SidebarViewController?
+    private var chromeTopInset: NSLayoutConstraint?
+    private var applyingInset = false
 
     static func startDirectory() -> String {
         switch UserDefaults.standard.string(forKey: "vata.startDir") ?? "Home" {
@@ -709,25 +830,47 @@ final class FileWindowController: NSWindowController {
         for pane in panes { split.addArrangedSubview(pane.view) }
         split.autosaveName = "VataMainSplit"
         split.setPosition(220, ofDividerAt: 0)
+        let hostView = ChromeHostView()
         let host = NSViewController()
-        host.view = NSView()
+        host.view = hostView
         split.translatesAutoresizingMaskIntoConstraints = false
-        host.view.addSubview(split)
+        hostView.addSubview(split)
+        let top = split.topAnchor.constraint(equalTo: hostView.topAnchor,
+                                             constant: TitlebarMetrics.contentTopInset(window))
+        chromeTopInset = top
         NSLayoutConstraint.activate([
-            split.leadingAnchor.constraint(equalTo: host.view.leadingAnchor),
-            split.trailingAnchor.constraint(equalTo: host.view.trailingAnchor),
-            split.topAnchor.constraint(equalTo: host.view.topAnchor),
-            split.bottomAnchor.constraint(equalTo: host.view.bottomAnchor),
+            split.leadingAnchor.constraint(equalTo: hostView.leadingAnchor),
+            split.trailingAnchor.constraint(equalTo: hostView.trailingAnchor),
+            top,
+            split.bottomAnchor.constraint(equalTo: hostView.bottomAnchor),
         ])
+        hostView.onLayout = { [weak self] in self?.applyChromeInset() }
+        window.delegate = self
         window.contentViewController = host
+        applyChromeInset()
         if activePane == nil { activePane = panes.first }
+    }
+
+    func applyChromeInset() {
+        guard !applyingInset, let window, let constraint = chromeTopInset else { return }
+        let inset = TitlebarMetrics.contentTopInset(window)
+        guard abs(constraint.constant - inset) > 0.5 else { return }
+        applyingInset = true
+        constraint.constant = inset
+        applyingInset = false
+    }
+
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        applyChromeInset()
     }
 
     func sidebarReload() { sidebar?.reload() }
 
-    func pinSelected() {
-        guard let item = activePane?.selectedItems.first else { return }
-        HeaderStore.shared.add(item.fullPath)
+    /// Pin `path` from the pane the command was given. Favorites are not
+    /// read off `activePane`, which a background listing can change.
+    func pin(path: String) {
+        HeaderStore.shared.add(path)
         sidebar?.reload()
     }
 
@@ -787,4 +930,11 @@ final class FileWindowController: NSWindowController {
         wc.showWindow(nil)
         AppDelegate.openWindows.append(wc)
     }
+}
+
+extension FileWindowController: NSWindowDelegate {
+    func windowDidResize(_ notification: Notification) { applyChromeInset() }
+    func windowDidChangeScreen(_ notification: Notification) { applyChromeInset() }
+    func windowDidEnterFullScreen(_ notification: Notification) { applyChromeInset() }
+    func windowDidExitFullScreen(_ notification: Notification) { applyChromeInset() }
 }

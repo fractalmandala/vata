@@ -96,10 +96,27 @@ final class ListContentView: NSViewController, PaneContent {
 
     private var expandedPaths = Set<String>()
     func show(items: [Fileinfo]) {
+        // Child-count refresh and chunked inserts call show() again.
+        // reloadData drops the selection; put back the same paths or a
+        // pin/alias that just selected a row acts on nothing.
+        let keep = selectedItems.map(\.fullPath)
         self.items = items
         outline.reloadData()
         for item in items where item.type == .folder && expandedPaths.contains(item.fullPath) {
             outline.expandItem(item)
+        }
+        if !keep.isEmpty {
+            var indexes = IndexSet()
+            for row in 0..<outline.numberOfRows {
+                if let info = outline.item(atRow: row) as? Fileinfo, keep.contains(info.fullPath) {
+                    indexes.insert(row)
+                }
+            }
+            if !indexes.isEmpty {
+                pane?.suspendActivation = true
+                outline.selectRowIndexes(indexes, byExtendingSelection: false)
+                pane?.suspendActivation = false
+            }
         }
         applyColumnVisibility()
     }

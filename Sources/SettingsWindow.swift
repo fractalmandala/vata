@@ -430,16 +430,27 @@ final class ThemeTable: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         (cell.subviews.first(where: { $0 is ThemeSwatch }) as? ThemeSwatch)?.theme = t
         return cell
     }
+    private var restoringSelection = false
     func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !restoringSelection else { return }
         guard let t = notification.object as? NSTableView else { return }
         let r = t.selectedRow
         let all = ThemeManager.shared.all
         guard r >= 0, r < all.count else { return }
-        ThemeManager.shared.select(name: all[r].name)
-        t.reloadData()
-        // Reload clears selection; restore it so Remove/Edit act on this row.
-        t.selectRowIndexes([r], byExtendingSelection: false)
+        let name = all[r].name
+        ThemeManager.shared.select(name: name)
         onChange()
+        // onChange reloads and drops the selection. Restoring inside this
+        // callback is ignored, so put the row back on the next turn —
+        // Duplicate/Remove run after that.
+        DispatchQueue.main.async { [weak self, weak t] in
+            guard let self, let t else { return }
+            let restored = ThemeManager.shared.all.firstIndex(where: { $0.name == name }) ?? r
+            guard (0..<t.numberOfRows).contains(restored), t.selectedRow != restored else { return }
+            self.restoringSelection = true
+            t.selectRowIndexes([restored], byExtendingSelection: false)
+            self.restoringSelection = false
+        }
     }
 }
 

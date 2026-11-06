@@ -66,6 +66,14 @@ project (`build.sh` compiles with `swiftc`). Source of truth for behavior:
 
 ## Traps already hit (do not repeat)
 
+- `fullSizeContentView` draws pane chrome under the titlebar. Clicks
+  hit the drag region; `NSApp.sendAction` still runs the action, so a
+  gate that only sendAction's stays green. Keep the split below
+  `TitlebarMetrics.contentTopInset`. Sidebar sections must set
+  `outlineTableColumn` and must NOT return true from `isGroupItem`
+  (group rows cover the disclosure button). Path popup items are wired
+  in `pathControl(_:willPopUp:)`, not by reading `pathControl.url`
+  (that is the current folder and undoes the pick).
 - `NSButton`/`NSMenuItem` hold targets **weakly**: inline `BlockTarget{}`
   deallocs instantly. `BlockTarget` now self-retains (`SettingsWindow.swift`).
   `ThemeEditor` needed the same via static `open[]` — window controllers

@@ -44,8 +44,11 @@ final class CommandRegistry {
             VataCommand(id: "clonePane", title: "Clone Pane", shortcut: "") {
                 ($0.view.window?.windowController as? FileWindowController)?.clonePane()
             },
-            VataCommand(id: "pin", title: "Add to Favorites", shortcut: "⌃⌘H") {
-                ($0.view.window?.windowController as? FileWindowController)?.pinSelected()
+            VataCommand(id: "pin", title: "Add to Favorites", shortcut: "⌃⌘H") { pane in
+                // The menu already resolved the pane. Reading activePane
+                // again races a listing reload in the other pane.
+                guard let path = pane.selectedItems.first?.fullPath else { return }
+                (pane.view.window?.windowController as? FileWindowController)?.pin(path: path)
             },
             VataCommand(id: "selectAll", title: "Select All", shortcut: "⌘A") { $0.selectAllContent() },
             VataCommand(id: "hidden", title: "Show Invisible Files", shortcut: "⇧⌘.") {

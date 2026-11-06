@@ -21,6 +21,12 @@ history. Each entry below lists what the user can now do.
 
 ## Unreleased (source only — revamp round)
 
+- Dual-pane chrome accepts clicks again. Back, Forward, Up, the path
+  popup, and List/Columns/Icons/Gallery were drawn in the translucent
+  titlebar band (so the window dragged instead of the button running),
+  and the sidebar Devices chevron was not an outline button. The gate
+  now fails when those controls sit in the drag band, lose hit-testing,
+  or do not change the pane.
 - Back to 2 panes in a plain split (4-pane grid deleted); Swap/Clone Pane.
 - Sidebar: Devices, Recent Folders, Favorites (pins moved here from the
   title bar), Tags with Spotlight search.
