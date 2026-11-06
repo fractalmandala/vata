@@ -136,8 +136,10 @@ struct ControlAudit {
         }
 
         // ---- 4. Header menu toggle flips visibility ----
+        // setMode replaces the list controller. Resolve the menu on the
+        // list that is actually installed, or the kind item is never built.
+        pane.setMode(.list)
         if let list = pane.children.compactMap({ $0 as? ListContentView }).first {
-            pane.setMode(.list)
             pane.menuNeedsUpdate(list.headerMenu)
             if let kindItem = list.headerMenu.items.first(where: { ($0.representedObject as? String) == "kind" }) {
                 let before = pane.visibleColumns.contains("kind")
@@ -146,7 +148,7 @@ struct ControlAudit {
                 }
                 check(pane.visibleColumns.contains("kind") != before, "intent:toggle-kind-column")
             } else { check(false, "uncovered-control:header-kind") }
-        }
+        } else { check(false, "uncovered-control:header-kind") }
 
         // ---- 5. Sort produces exact orders ----
         pane.navigate(to: scratch, record: true)
@@ -265,20 +267,24 @@ struct ControlAudit {
             pane.navigate(to: scratch, record: false)
             waitForPath(pane, scratch)
             let end = Date().addingTimeInterval(5.0)
-            var found = -1
-            while found < 0 && Date() < end {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            var stuck = false
+            while !stuck && Date() < end {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.15))
                 guard let list = pane.children.compactMap({ $0 as? ListContentView }).first else { continue }
-                if list.outline.numberOfRows == 0 { continue }
-                for r in 0..<list.outline.numberOfRows {
-                    if (list.outline.item(atRow: r) as? Fileinfo)?.name == name { found = r; break }
+                var found = -1
+                if list.outline.numberOfRows > 0 {
+                    for r in 0..<list.outline.numberOfRows {
+                        if (list.outline.item(atRow: r) as? Fileinfo)?.name == name { found = r; break }
+                    }
                 }
-            }
-            check(found >= 0, "intent:row-found:\(name)")
-            if found >= 0,
-               let list = pane.children.compactMap({ $0 as? ListContentView }).first {
+                guard found >= 0 else { continue }
                 list.outline.selectRowIndexes([found], byExtendingSelection: false)
+                // display() reloads on the next turn and clears the selection.
+                // Keep the row only once that reload has landed.
+                RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+                stuck = pane.selectedItems.contains(where: { $0.name == name })
             }
+            check(stuck, "intent:row-found:\(name)")
         }
         runCmd("selectAll")
         if let list = pane.children.compactMap({ $0 as? ListContentView }).first {
@@ -286,11 +292,13 @@ struct ControlAudit {
         }
         selectRow(named: "bb2.txt")
         runCmd("alias")
-        check(fm.fileExists(atPath: "\(scratch)/bb.txt alias"), "intent:alias-exact")
+        check(fm.fileExists(atPath: "\(scratch)/bb2.txt alias"), "intent:alias-exact")
         selectRow(named: "arch.zip")
         runCmd("extract")
         check(fm.fileExists(atPath: "\(scratch)/arch/z.txt"), "intent:extract-exact")
         selectRow(named: "sub")
+        // Pin follows the active pane. selectRow targeted `pane`.
+        wc.activePane = pane
         runCmd("pin")
         check(HeaderStore.shared.paths.contains("\(scratch)/sub"), "intent:pin-exact"); print("TR pin sel=", pane.selectedItems.map{$0.name}, "activeIsPane=", wc.activePane === pane)
         HeaderStore.shared.remove("\(scratch)/sub")
@@ -305,13 +313,18 @@ struct ControlAudit {
         runCmd("hidden")
         check(Settings.shared.showHiddenFiles != hiddenBefore, "intent:hidden-flips")
         runCmd("hidden")
-        pane.navigate(to: scratch, record: true)
-        waitForPath(pane, scratch)
+        // `pane` may no longer sit in the left slot after earlier swaps.
+        // Drive the slots the assertions name, and keep that left pane active
+        // so clone copies it onto the right.
+        wc.leftPane.navigate(to: scratch, record: true)
+        waitForPath(wc.leftPane, scratch)
         wc.rightPane.navigate(to: "/Applications", record: true)
         waitForPath(wc.rightPane, "/Applications")
+        wc.activePane = wc.leftPane
         runCmd("swapPanes")
         check(wc.leftPane.displayedPath == "/Applications" && wc.rightPane.displayedPath == scratch, "intent:swap-exact")
         runCmd("swapPanes")
+        wc.activePane = wc.leftPane
         runCmd("clonePane")
         waitForPath(wc.rightPane, scratch)
         check(wc.rightPane.displayedPath == scratch, "intent:clone-exact")
@@ -422,12 +435,17 @@ struct ControlAudit {
                 (0..<t.numberOfRows).contains { rowText(t, $0) == "Dark" }
             }
             if let th = tables(in: root).first(where: isThemeTable) {
+                th.reloadData()
+                var pickedGate = false
                 for r in 0..<th.numberOfRows {
-                    if (th.view(atColumn: 0, row: r, makeIfNecessary: true) as? NSTableCellView)?.textField?.stringValue.hasPrefix("GateTmp") == true {
+                    let label = (th.view(atColumn: 0, row: r, makeIfNecessary: true) as? NSTableCellView)?.textField?.stringValue ?? ""
+                    if label == "GateTmp" || label == "GateTmp ✓" {
                         th.selectRowIndexes([r], byExtendingSelection: false)
+                        pickedGate = true
                         break
                     }
                 }
+                check(pickedGate, "settings:gate-tmp-selected")
                 RunLoop.main.run(until: Date().addingTimeInterval(0.3))
                 check(pressButton("Duplicate"), "settings:duplicate-button-live")
                 check(ThemeManager.shared.all.contains(where: { $0.name == "GateTmp Copy" }), "intent:theme-duplicate-exact")

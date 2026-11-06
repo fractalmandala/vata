@@ -198,7 +198,12 @@ class PaneViewController: NSViewController {
         vc.pane = self
         vc.onSelectionChange = { [weak self] in
             guard let self else { return }
-            (self.view.window?.windowController as? FileWindowController)?.activePane = self
+            // A listing reload posts selection-did-change with an empty
+            // selection. Treating that as activation steals the pane the
+            // commands (pin, clone) act on.
+            if !self.selectedItems.isEmpty {
+                (self.view.window?.windowController as? FileWindowController)?.activePane = self
+            }
             self.updateChrome()
         }
         vc.onOpen = { [weak self] in self?.openItem($0) }
@@ -430,12 +435,16 @@ class PaneViewController: NSViewController {
     @objc func goBackward() {
         guard historyIndex > 0 else { return }
         historyIndex -= 1
+        // History, not the listing, decides whether Forward is clickable.
+        // display() updates the chrome later, after the folder loads.
+        updateChrome()
         navigate(to: history[historyIndex], record: false)
     }
 
     @objc func goForward() {
         guard historyIndex < history.count - 1 else { return }
         historyIndex += 1
+        updateChrome()
         navigate(to: history[historyIndex], record: false)
     }
 
