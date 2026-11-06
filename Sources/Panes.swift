@@ -198,10 +198,10 @@ class PaneViewController: NSViewController {
         vc.pane = self
         vc.onSelectionChange = { [weak self] in
             guard let self else { return }
-            // A listing reload posts selection-did-change with an empty
-            // selection. Treating that as activation steals the pane the
-            // commands (pin, clone) act on.
-            if !self.selectedItems.isEmpty {
+            // A listing reload posts selection-did-change, including the
+            // restore in ListContentView.show. That must not steal the pane
+            // clone and the window chrome treat as active.
+            if !self.suspendActivation, !self.selectedItems.isEmpty {
                 (self.view.window?.windowController as? FileWindowController)?.activePane = self
             }
             self.updateChrome()
@@ -230,6 +230,8 @@ class PaneViewController: NSViewController {
 
     var displayedPath: String { historyIndex >= 0 ? history[historyIndex] : datasource.initialPath }
     var selectedItems: [Fileinfo] { content?.selectedItems ?? [] }
+    /// Set while a reload is putting the previous selection back.
+    var suspendActivation = false
 
     func selectAllContent() { content?.selectAll() }
 
@@ -865,9 +867,10 @@ final class FileWindowController: NSWindowController {
 
     func sidebarReload() { sidebar?.reload() }
 
-    func pinSelected() {
-        guard let item = activePane?.selectedItems.first else { return }
-        HeaderStore.shared.add(item.fullPath)
+    /// Pin `path` from the pane the command was given. Favorites are not
+    /// read off `activePane`, which a background listing can change.
+    func pin(path: String) {
+        HeaderStore.shared.add(path)
         sidebar?.reload()
     }
 

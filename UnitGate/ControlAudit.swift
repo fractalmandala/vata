@@ -297,11 +297,12 @@ struct ControlAudit {
         runCmd("extract")
         check(fm.fileExists(atPath: "\(scratch)/arch/z.txt"), "intent:extract-exact")
         selectRow(named: "sub")
-        // Pin follows the active pane. selectRow targeted `pane`.
-        wc.activePane = pane
         runCmd("pin")
-        check(HeaderStore.shared.paths.contains("\(scratch)/sub"), "intent:pin-exact"); print("TR pin sel=", pane.selectedItems.map{$0.name}, "activeIsPane=", wc.activePane === pane)
-        HeaderStore.shared.remove("\(scratch)/sub")
+        // contentsOfDirectory hands back /private/tmp when the gate used /tmp.
+        let want = "\(scratch)/sub"
+        let pinned = HeaderStore.shared.paths.filter { samePath($0, want) }
+        check(!pinned.isEmpty, "intent:pin-exact sel=\(pane.selectedItems.map(\.name)) stored=\(HeaderStore.shared.paths)")
+        pinned.forEach { HeaderStore.shared.remove($0) }
         runCmd("reload")
         check(pane.displayedPath == scratch, "intent:reload-keeps-path")
         selectRow(named: "ccc.md")
